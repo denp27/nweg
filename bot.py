@@ -4,7 +4,6 @@
 import os
 import json
 import secrets
-import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
@@ -28,7 +27,6 @@ CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 PLATEGA_API_KEY = "YOUR_PLATEGA_API_KEY"
 PLATEGA_SHOP_ID = "YOUR_SHOP_ID"
 PLATEGA_API_URL = "https://platega.io/api/v1"
-PLATEGA_SECRET_KEY = "YOUR_PLATEGA_SECRET_KEY"
 
 # Файлы для данных
 SUBS_FILE = "subscriptions.json"
@@ -37,11 +35,11 @@ CACHE_FILE = "message_cache.json"
 MEDIA_CACHE_FILE = "media_cache.json"
 
 # Хранилища
-subscriptions: Dict[int, dict] = {}  # user_id: {"expiry": datetime, "plan": str}
+subscriptions: Dict[int, dict] = {}
 pending_payments: Dict[str, dict] = {}
-message_cache: Dict[int, Dict[int, dict]] = defaultdict(dict)  # text cache
-media_cache: Dict[int, Dict[int, dict]] = defaultdict(dict)  # media files cache
-notified_users: Dict[int, dict] = {}  # для отслеживания уведомлений
+message_cache: Dict[int, Dict[int, dict]] = defaultdict(dict)
+media_cache: Dict[int, Dict[int, dict]] = defaultdict(dict)
+notified_users: Dict[int, dict] = {}
 
 # Цены
 PRICES = {
@@ -202,113 +200,101 @@ async def check_platega_payment(payment_id: str) -> bool:
     except:
         return False
 
-# ========== ПРОВЕРКА ПОДПИСОК И УВЕДОМЛЕНИЯ ==========
-async def check_expiring_subscriptions(app: Application):
+# ========== ФОНОВЫЕ ЗАДАЧИ (через JobQueue) ==========
+async def check_expiring_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     """Проверяет подписки и отправляет уведомления"""
-    while True:
-        try:
-            now = datetime.now(pytz.UTC)
-            to_remove = []
-            
-            for user_id, sub in list(subscriptions.items()):
-                expiry = sub["expiry"]
-                plan = sub["plan"]
-                time_left = expiry - now
-                hours_left = time_left.total_seconds() / 3600
-                
-                # Уведомления за час, 30 минут, 10 минут
-                if 0.9 < hours_left <= 1.1 and notified_users.get(user_id, {}).get("1h") != expiry.isoformat():
-                    await app.bot.send_message(
-                        chat_id=user_id,
-                        text=f"⏰ Напоминание: Ваша подписка истечёт через 1 час!\nПлан: {plan}\nПродлите подписку через /start"
-                    )
-                    if user_id not in notified_users:
-                        notified_users[user_id] = {}
-                    notified_users[user_id]["1h"] = expiry.isoformat()
-                
-                elif 0.45 < hours_left <= 0.55 and notified_users.get(user_id, {}).get("30m") != expiry.isoformat():
-                    await app.bot.send_message(
-                        chat_id=user_id,
-                        text=f"⏰ Напоминание: Ваша подписка истечёт через 30 минут!\nПлан: {plan}\nПродлите подписку через /start"
-                    )
-                    if user_id not in notified_users:
-                        notified_users[user_id] = {}
-                    notified_users[user_id]["30m"] = expiry.isoformat()
-                
-                elif 0.15 < hours_left <= 0.2 and notified_users.get(user_id, {}).get("10m") != expiry.isoformat():
-                    await app.bot.send_message(
-                        chat_id=user_id,
-                        text=f"⚠️ Ваша подписка истечёт через 10 минут!\nПлан: {plan}\nСрочно продлите подписку через /start"
-                    )
-                    if user_id not in notified_users:
-                        notified_users[user_id] = {}
-                    notified_users[user_id]["10m"] = expiry.isoformat()
-                
-                # Подписка истекла
-                elif expiry <= now:
-                    await app.bot.send_message(
-                        chat_id=user_id,
-                        text=f"❌ Ваша подписка истекла!\nПлан: {plan}\nИспользуйте /start для продления"
-                    )
-                    to_remove.append(user_id)
-            
-            for user_id in to_remove:
-                del subscriptions[user_id]
-                if user_id in notified_users:
-                    del notified_users[user_id]
-            
-            if to_remove:
-                save_data()
+    now = datetime.now(pytz.UTC)
+    to_remove = []
+    
+    for user_id, sub in list(subscriptions.items()):
+        expiry = sub["expiry"]
+        plan = sub["plan"]
+        time_left = expiry - now
+        hours_left = time_left.total_seconds() / 3600
         
-        except Exception as e:
-            print(f"[CHECKER] Error: {e}")
+        # Уведомления за час, 30 минут, 10 минут
+        if 0.9 < hours_left <= 1.1 and notified_users.get(user_id, {}).get("1h") != expiry.isoformat():
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⏰ Напоминание: Ваша подписка истечёт через 1 час!\nПлан: {plan}\nПродлите подписку через /start"
+            )
+            if user_id not in notified_users:
+                notified_users[user_id] = {}
+            notified_users[user_id]["1h"] = expiry.isoformat()
         
-        await asyncio.sleep(60)  # Проверка каждую минуту
+        elif 0.45 < hours_left <= 0.55 and notified_users.get(user_id, {}).get("30m") != expiry.isoformat():
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⏰ Напоминание: Ваша подписка истечёт через 30 минут!\nПлан: {plan}\nПродлите подписку через /start"
+            )
+            if user_id not in notified_users:
+                notified_users[user_id] = {}
+            notified_users[user_id]["30m"] = expiry.isoformat()
+        
+        elif 0.15 < hours_left <= 0.2 and notified_users.get(user_id, {}).get("10m") != expiry.isoformat():
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⚠️ Ваша подписка истечёт через 10 минут!\nПлан: {plan}\nСрочно продлите подписку через /start"
+            )
+            if user_id not in notified_users:
+                notified_users[user_id] = {}
+            notified_users[user_id]["10m"] = expiry.isoformat()
+        
+        # Подписка истекла
+        elif expiry <= now:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ Ваша подписка истекла!\nПлан: {plan}\nИспользуйте /start для продления"
+            )
+            to_remove.append(user_id)
+    
+    for user_id in to_remove:
+        del subscriptions[user_id]
+        if user_id in notified_users:
+            del notified_users[user_id]
+    
+    if to_remove:
+        save_data()
 
-# ========== ПРОВЕРКА ПЛАТЕЖЕЙ ==========
-async def payment_checker_job(app: Application):
-    while True:
-        try:
-            to_remove = []
-            for payment_id, payment in list(pending_payments.items()):
-                user_id = payment["user_id"]
-                method = payment["method"]
-                
-                if method == "stars":
-                    continue
-                
-                created_at = datetime.fromisoformat(payment.get("created_at", datetime.now().isoformat()))
-                if datetime.now() - created_at > timedelta(days=7):
-                    to_remove.append(payment_id)
-                    continue
-                
-                if method == "crypto" and payment.get("invoice_id"):
-                    if await check_crypto_payment(payment["invoice_id"]):
-                        activate_subscription(user_id, payment["plan"])
-                        to_remove.append(payment_id)
-                        await app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}"
-                        )
-                
-                elif method == "platega":
-                    if await check_platega_payment(payment_id):
-                        activate_subscription(user_id, payment["plan"])
-                        to_remove.append(payment_id)
-                        await app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}"
-                        )
-            
-            for payment_id in to_remove:
-                if payment_id in pending_payments:
-                    del pending_payments[payment_id]
-            
-            if to_remove:
-                save_data()
-        except Exception as e:
-            print(f"[PAYMENT_CHECKER] Error: {e}")
-        await asyncio.sleep(30)
+async def check_payments_job(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет ожидающие платежи"""
+    to_remove = []
+    for payment_id, payment in list(pending_payments.items()):
+        user_id = payment["user_id"]
+        method = payment["method"]
+        
+        if method == "stars":
+            continue
+        
+        created_at = datetime.fromisoformat(payment.get("created_at", datetime.now().isoformat()))
+        if datetime.now() - created_at > timedelta(days=7):
+            to_remove.append(payment_id)
+            continue
+        
+        if method == "crypto" and payment.get("invoice_id"):
+            if await check_crypto_payment(payment["invoice_id"]):
+                activate_subscription(user_id, payment["plan"])
+                to_remove.append(payment_id)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}"
+                )
+        
+        elif method == "platega":
+            if await check_platega_payment(payment_id):
+                activate_subscription(user_id, payment["plan"])
+                to_remove.append(payment_id)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}"
+                )
+    
+    for payment_id in to_remove:
+        if payment_id in pending_payments:
+            del pending_payments[payment_id]
+    
+    if to_remove:
+        save_data()
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
@@ -348,6 +334,13 @@ def faq_keyboard():
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
     ]
     return InlineKeyboardMarkup(buttons)
+
+def get_media_emoji(media_type: str) -> str:
+    emojis = {
+        "photo": "📷", "video": "🎥", "video_note": "🔄", "voice": "🎙️",
+        "animation": "🎬", "sticker": "🏷️", "timered_photo": "⏰📷", "timered_video": "⏰🎥"
+    }
+    return emojis.get(media_type, "📎")
 
 # ========== КОМАНДЫ ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -429,9 +422,8 @@ async def show_deleted_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("📭 У вас пока нет сохранённых удалённых медиа", reply_markup=main_menu())
         return
     
-    # Создаём клавиатуру со списком медиа
     buttons = []
-    for msg_id, media in list(media_cache[user_id].items())[:20]:  # последние 20
+    for msg_id, media in list(media_cache[user_id].items())[:20]:
         media_type = media.get("type", "unknown")
         date = datetime.fromisoformat(media["date"]).astimezone(TIMEZONE).strftime('%d.%m %H:%M')
         buttons.append([InlineKeyboardButton(
@@ -446,13 +438,6 @@ async def show_deleted_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown"
     )
 
-def get_media_emoji(media_type: str) -> str:
-    emojis = {
-        "photo": "📷", "video": "🎥", "video_note": "🔄", "voice": "🎙️",
-        "animation": "🎬", "sticker": "🏷️", "timered_photo": "⏰📷", "timered_video": "⏰🎥"
-    }
-    return emojis.get(media_type, "📎")
-
 async def view_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -466,7 +451,9 @@ async def view_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media = media_cache[user_id][msg_id]
     media_type = media.get("type")
     file_path = media.get("file_path")
-    caption = f"📸 Удалённое медиа\n📅 Получено: {datetime.fromisoformat(media['date']).astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}\n🗑 Удалено: {datetime.fromisoformat(media['deleted_date']).astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
+    caption = f"📸 Удалённое медиа\n📅 Получено: {datetime.fromisoformat(media['date']).astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
+    if "deleted_date" in media:
+        caption += f"\n🗑 Удалено: {datetime.fromisoformat(media['deleted_date']).astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
     
     try:
         if media_type in ["photo", "timered_photo"]:
@@ -488,7 +475,6 @@ async def view_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_voice(chat_id=user_id, voice=f, caption=caption)
             await query.delete_message()
         
-        # Добавляем кнопку "Назад"
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К списку", callback_data="deleted_media")]])
         await context.bot.send_message(chat_id=user_id, text="Выберите действие:", reply_markup=keyboard)
     
@@ -498,9 +484,7 @@ async def view_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК BUSINESS API ==========
 async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Универсальный обработчик для всех бизнес-событий"""
-    
-    # 1. Подключение бота к бизнес-аккаунту
+    # 1. Подключение бота
     if hasattr(update, 'business_connection') and update.business_connection:
         conn = update.business_connection
         user_id = conn.user.id
@@ -508,7 +492,6 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         print(f"[BUSINESS] Bot connected to user {user_id}")
         
-        # Отправляем приветствие
         await context.bot.send_message(
             chat_id=chat_id,
             text="🤖 **Бот успешно подключен к вашему бизнес-аккаунту!**\n\n"
@@ -522,7 +505,6 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="Markdown"
         )
         
-        # Если у пользователя нет подписки - предлагаем пробный доступ
         has_sub, _, _ = await has_subscription(user_id)
         if not has_sub:
             await context.bot.send_message(
@@ -534,7 +516,7 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         return
     
-    # 2. Кэширование новых сообщений и медиа
+    # 2. Кэширование новых сообщений
     if hasattr(update, 'business_message') and update.business_message:
         msg = update.business_message
         user_id = msg.from_user.id
@@ -558,55 +540,36 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         os.makedirs(f"media/{user_id}", exist_ok=True)
         
-        # Обычное фото
         if msg.photo:
             file = await msg.photo[-1].get_file()
             file_path = f"media/{user_id}/photo_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             await file.download_to_drive(file_path)
             media_type = "photo"
             media_saved = True
-        
-        # Одноразовое фото (с таймером)
-        elif hasattr(msg, 'media_group_id') and msg.photo and msg.via_bot:
-            file = await msg.photo[-1].get_file()
-            file_path = f"media/{user_id}/timered_photo_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-            await file.download_to_drive(file_path)
-            media_type = "timered_photo"
-            media_saved = True
-        
-        # Видео
         elif msg.video:
             file = await msg.video.get_file()
-            file_path = f"media/{user_id}/video_{msg.message_id}_{datetime.now().strftime('%Y%d%m_%H%M%S')}.mp4"
+            file_path = f"media/{user_id}/video_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             await file.download_to_drive(file_path)
             media_type = "video"
             media_saved = True
-        
-        # Одноразовое видео (кружок с таймером)
         elif msg.video_note:
             file = await msg.video_note.get_file()
             file_path = f"media/{user_id}/videonote_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             await file.download_to_drive(file_path)
             media_type = "video_note"
             media_saved = True
-        
-        # Голосовое
         elif msg.voice:
             file = await msg.voice.get_file()
             file_path = f"media/{user_id}/voice_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ogg"
             await file.download_to_drive(file_path)
             media_type = "voice"
             media_saved = True
-        
-        # GIF
         elif msg.animation:
             file = await msg.animation.get_file()
             file_path = f"media/{user_id}/gif_{msg.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gif"
             await file.download_to_drive(file_path)
             media_type = "animation"
             media_saved = True
-        
-        # Стикер
         elif msg.sticker:
             file = await msg.sticker.get_file()
             ext = "webp"
@@ -668,7 +631,6 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chat_id = deleted.chat.id
             
             for msg_id in deleted.message_ids:
-                # Отправляем копию текстового сообщения
                 if user_id in message_cache and msg_id in message_cache[user_id]:
                     cached = message_cache[user_id][msg_id]
                     report = (
@@ -679,7 +641,6 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                     await context.bot.send_message(chat_id=chat_id, text=report, parse_mode="Markdown")
                 
-                # Сохраняем информацию об удалении медиа
                 if user_id in media_cache and msg_id in media_cache[user_id]:
                     media_cache[user_id][msg_id]["deleted_date"] = datetime.now().isoformat()
                     save_data()
@@ -691,9 +652,9 @@ async def handle_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE)
                              f"Вы можете посмотреть его в меню «Удалённые медиа»"
                     )
             
-            print(f"[BUSINESS] Processed {len(deleted.message_ids)} deleted messages for user {user_id}")
+            print(f"[BUSINESS] Processed {len(deleted.message_ids)} deleted messages")
 
-# ========== АВТОСОХРАНЕНИЕ МЕДИА (ПРИ ОТВЕТЕ) ==========
+# ========== АВТОСОХРАНЕНИЕ МЕДИА ==========
 async def auto_save_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.reply_to_message:
         return
@@ -709,37 +670,31 @@ async def auto_save_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     saved = False
     media_type = ""
-    file_path = None
     
     try:
         if reply.photo:
             file = await reply.photo[-1].get_file()
-            file_path = f"media/{user_id}/saved_photo_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_photo_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
             saved = True
             media_type = "фото"
         elif reply.video:
             file = await reply.video.get_file()
-            file_path = f"media/{user_id}/saved_video_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_video_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
             saved = True
             media_type = "видео"
         elif reply.voice:
             file = await reply.voice.get_file()
-            file_path = f"media/{user_id}/saved_voice_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ogg"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_voice_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ogg")
             saved = True
             media_type = "голосовое"
         elif reply.video_note:
             file = await reply.video_note.get_file()
-            file_path = f"media/{user_id}/saved_videonote_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_videonote_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
             saved = True
             media_type = "кружок"
         elif reply.animation:
             file = await reply.animation.get_file()
-            file_path = f"media/{user_id}/saved_gif_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gif"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_gif_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.gif")
             saved = True
             media_type = "GIF"
         elif reply.sticker:
@@ -749,18 +704,16 @@ async def auto_save_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ext = "tgs"
             elif reply.sticker.is_video:
                 ext = "webm"
-            file_path = f"media/{user_id}/saved_sticker_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
-            await file.download_to_drive(file_path)
+            await file.download_to_drive(f"media/{user_id}/saved_sticker_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}")
             saved = True
             media_type = "стикер"
     except Exception as e:
         print(f"[SAVE_MEDIA] Error: {e}")
     
-    if saved and file_path:
+    if saved:
         await update.message.reply_text(
             f"✅ **{media_type} сохранено!**\n\n"
-            f"📅 Время: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}\n"
-            f"📁 Файл сохранён в кэш"
+            f"📅 Время: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
         )
 
 # ========== CALLBACK HANDLER ==========
@@ -820,10 +773,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif data.startswith("faq_"):
             texts = {
-                "connect": "🔌 **Подключение бота:**\n\n1. Настройки Telegram\n2. Telegram для бизнеса\n3. Чат-боты\n4. Добавить бота\n5. Введите @username бота\n\nПосле подключения я пришлю приветствие!",
-                "delete": "❌ **Отслеживание удалений:**\n\nБот автоматически кэширует все ваши сообщения и медиа. При удалении вы получите точную копию с датами. Удалённые медиа доступны в меню «Удалённые медиа».",
-                "save": "💾 **Сохранение медиа:**\n\nПросто ответьте на любое сообщение с фото/видео/голосовым/кружком/GIF/стикером — бот сохранит его автоматически!",
-                "payment": "💳 **Способы оплаты:**\n\n• ⭐ Telegram Stars (мгновенно)\n• 🪙 CryptoBot (USDT)\n• 💳 Platega.io (карты РФ, СБП)",
+                "connect": "🔌 **Подключение бота:**\n\n1. Настройки Telegram\n2. Telegram для бизнеса\n3. Чат-боты\n4. Добавить бота\n5. Введите @username бота",
+                "delete": "❌ **Отслеживание удалений:**\n\nБот автоматически кэширует все сообщения и медиа. При удалении вы получите точную копию.",
+                "save": "💾 **Сохранение медиа:**\n\nПросто ответьте на любое сообщение с медиа — бот сохранит его автоматически!",
+                "payment": "💳 **Способы оплаты:**\n\n• ⭐ Telegram Stars\n• 🪙 CryptoBot (USDT)\n• 💳 Platega.io (карты РФ, СБП)",
             }
             topic = data.replace("faq_", "")
             await query.edit_message_text(texts.get(topic, "Ответ не найден"), reply_markup=faq_keyboard())
@@ -869,12 +822,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🪙 **Оплата через CryptoBot**\n\n"
                         f"Сумма: {amount} USDT\n"
                         f"[Оплатить]({url})\n\n"
-                        f"ID: `{payment_id}`\n\n"
-                        f"После оплаты подписка активируется автоматически",
+                        f"ID: `{payment_id}`",
                         parse_mode="Markdown"
                     )
                 else:
-                    await query.edit_message_text("❌ Ошибка создания счёта в CryptoBot. Попробуйте позже.")
+                    await query.edit_message_text("❌ Ошибка создания счёта в CryptoBot")
             
             elif method == "platega":
                 amount = PRICES[plan]["rub"]
@@ -884,12 +836,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"💳 **Оплата через Platega.io**\n\n"
                         f"Сумма: {amount} ₽\n"
                         f"[Оплатить]({url})\n\n"
-                        f"ID: `{payment_id}`\n\n"
-                        f"После оплаты подписка активируется автоматически",
+                        f"ID: `{payment_id}`",
                         parse_mode="Markdown"
                     )
                 else:
-                    await query.edit_message_text("❌ Ошибка создания счёта в Platega.io. Попробуйте позже.")
+                    await query.edit_message_text("❌ Ошибка создания счёта в Platega.io")
     
     except Exception as e:
         print(f"[CALLBACK] Error: {e}")
@@ -941,9 +892,14 @@ def main():
     # Автосохранение медиа при ответе
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_save_media))
     
-    # Запускаем фоновые задачи
-    asyncio.create_task(check_expiring_subscriptions(app))
-    asyncio.create_task(payment_checker_job(app))
+    # JobQueue для фоновых задач
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(check_expiring_subscriptions, interval=60, first=10)
+        job_queue.run_repeating(check_payments_job, interval=30, first=5)
+        print("[JOB] Scheduled background tasks")
+    else:
+        print("[WARNING] JobQueue not available, install: pip install python-telegram-bot[job-queue]")
     
     print("=" * 60)
     print("✅ БОТ ЗАПУЩЕН!")
@@ -951,19 +907,13 @@ def main():
     print("📌 ФУНКЦИОНАЛ:")
     print("   1. Полная проверка платежей (Stars, CryptoBot, Platega.io)")
     print("   2. Уведомления об окончании подписки (за час, 30 мин, 10 мин)")
-    print("   3. Сохранение всех типов медиа (фото, видео, GIF, стикеры)")
+    print("   3. Сохранение всех типов медиа")
     print("   4. Сохранение одноразовых фото и видео с таймером")
     print("   5. Просмотр удалённых медиа в меню")
     print("   6. Отслеживание изменённых и удалённых сообщений")
-    print("=" * 60)
-    print("\n📌 КАК ПОДКЛЮЧИТЬ БОТА:")
-    print("   1. Настройки Telegram → Telegram для бизнеса")
-    print("   2. Чат-боты → Добавить")
-    print(f"   3. Введите @{(app.bot.username if hasattr(app.bot, 'username') else BOT_TOKEN.split(':')[0])}")
-    print("   4. Выберите чаты для отслеживания")
     print("=" * 60)
     
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main()in()

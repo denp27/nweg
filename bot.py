@@ -6,6 +6,7 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from collections import defaultdict
+from telegram.ext import filters
 
 import pytz
 import aiohttp
@@ -688,9 +689,9 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     
     # Business API (отслеживание изменений/удалений)
-    app.add_handler(MessageHandler(filters.IS_BUSINESS_MESSAGE, cache_incoming_message))
-    app.add_handler(MessageHandler(filters.BUSINESS_MESSAGE_EDITED, handle_edited_message))
-    app.add_handler(MessageHandler(filters.BUSINESS_MESSAGE_DELETED, handle_deleted_message))
+   app.add_handler(MessageHandler(filters.BUSINESS & filters.TEXT, cache_incoming_message))
+   app.add_handler(MessageHandler(filters.EDITED_BUSINESS_MESSAGE, handle_edited_message))
+   app.add_handler(MessageHandler(filters.DELETED_BUSINESS_MESSAGES, handle_deleted_message))
     
     # Автосохранение медиа (ответом на сообщение без команды)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, auto_save_media))

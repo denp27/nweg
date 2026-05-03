@@ -667,9 +667,6 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"✅ **Подписка активирована!**\n\nТариф: {plan.replace('_', ' ')}\nДобро пожаловать!")
 
 # ========== ЗАПУСК БОТА ==========
-async def get_bot_username():
-    return BOT_TOKEN.split(":")[0]  # Временная заглушка
-
 def main():
     load_data()
     os.makedirs("media", exist_ok=True)
@@ -685,17 +682,16 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     
-    # Callback кнопки
+    # Callback
     app.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Business API (отслеживание изменений/удалений)
-   app.add_handler(MessageHandler(filters.BUSINESS & filters.TEXT, cache_incoming_message))
-   app.add_handler(MessageHandler(filters.EDITED_BUSINESS_MESSAGE, handle_edited_message))
-   app.add_handler(MessageHandler(filters.DELETED_BUSINESS_MESSAGES, handle_deleted_message))
+    # Business API (правильные фильтры)
+    app.add_handler(MessageHandler(filters.BUSINESS, cache_incoming_message))
+    app.add_handler(MessageHandler(filters.EDITED_BUSINESS_MESSAGE, handle_edited_message))
+    app.add_handler(MessageHandler(filters.DELETED_BUSINESS_MESSAGES, handle_deleted_message))
     
-    # Автосохранение медиа (ответом на сообщение без команды)
+    # Автосохранение
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, auto_save_media))
-    
     print("✅ Бот запущен!")
     print("📌 Возможности:")
     print("   • Отслеживание удалённых/изменённых сообщений (Business API)")

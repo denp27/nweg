@@ -18,9 +18,10 @@ from telegram.ext import (
 )
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ЗАМЕНИТЕ
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ЗАМЕНИТЕ НА ВАШ ТОКЕН
 TIMEZONE = pytz.timezone("Europe/Moscow")
 
+# API ключи (оставьте пустыми, если не используете)
 CRYPTOBOT_TOKEN = "YOUR_CRYPTOBOT_TOKEN"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
 
@@ -93,19 +94,13 @@ def activate_subscription(user_id: int, plan: str):
     expiry = datetime.now(pytz.UTC) + PLANS[plan]
     subscriptions[user_id] = expiry
     save_data()
-    print(f"[ACTIVATE] User {user_id} activated {plan} until {expiry}")
 
-# ========== CRYPTOBOT ПЛАТЕЖИ ==========
+# ========== ПЛАТЕЖИ (упрощённо) ==========
 async def create_crypto_invoice(amount: float, asset: str, user_id: int, plan: str) -> Tuple[Optional[str], Optional[str]]:
     try:
         url = f"{CRYPTOBOT_API_URL}/createInvoice"
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
-        params = {
-            "asset": asset,
-            "amount": str(amount),
-            "description": f"Subscription {plan} for user {user_id}",
-            "paid_btn_name": "callback",
-        }
+        params = {"asset": asset, "amount": str(amount), "description": f"Subscription {plan}"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, params=params) as resp:
                 data = await resp.json()
@@ -113,24 +108,14 @@ async def create_crypto_invoice(amount: float, asset: str, user_id: int, plan: s
                     invoice = data["result"]
                     invoice_id = str(invoice["invoice_id"])
                     payment_id = f"crypto_{invoice_id}"
-                    pending_payments[payment_id] = {
-                        "user_id": user_id,
-                        "plan": plan,
-                        "method": "crypto",
-                        "asset": asset,
-                        "amount": amount,
-                        "invoice_id": invoice_id,
-                        "status": "pending",
-                        "created_at": datetime.now().isoformat()
-                    }
+                    pending_payments[payment_id] = {"user_id": user_id, "plan": plan, "method": "crypto", "invoice_id": invoice_id}
                     save_data()
-                    print(f"[CRYPTO] Created invoice {invoice_id} for user {user_id}")
                     return invoice["bot_invoice_url"], payment_id
-    except Exception as e:
-        print(f"[CRYPTO] Error creating invoice: {e}")
+    except:
+        pass
     return None, None
 
-async def check_crypto_payment(invoice_id: str) -> Tuple[bool, Optional[str]]:
+async def check_crypto_payment(invoice_id: str) -> bool:
     try:
         url = f"{CRYPTOBOT_API_URL}/getInvoices"
         headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
@@ -139,47 +124,26 @@ async def check_crypto_payment(invoice_id: str) -> Tuple[bool, Optional[str]]:
             async with session.get(url, headers=headers, params=params) as resp:
                 data = await resp.json()
                 if data.get("ok") and data["result"]["items"]:
-                    invoice = data["result"]["items"][0]
-                    status = invoice.get("status")
-                    print(f"[CRYPTO] Invoice {invoice_id} status: {status}")
-                    if status == "paid":
-                        return True, invoice.get("paid_amount")
-                    elif status == "expired":
-                        return False, None
-    except Exception as e:
-        print(f"[CRYPTO] Error checking: {e}")
-    return False, None
+                    return data["result"]["items"][0].get("status") == "paid"
+    except:
+        pass
+    return False
 
-# ========== PLATEGA ПЛАТЕЖИ ==========
 async def create_platega_payment(amount: float, user_id: int, plan: str) -> Tuple[Optional[str], Optional[str]]:
     try:
         payment_id = f"platega_{secrets.token_hex(8)}"
         url = f"{PLATEGA_API_URL}/invoice/create"
         headers = {"API-Key": PLATEGA_API_KEY, "Content-Type": "application/json"}
-        payload = {
-            "shop_id": PLATEGA_SHOP_ID,
-            "amount": amount,
-            "currency": "RUB",
-            "order_id": payment_id,
-            "description": f"Subscription {plan} for user {user_id}",
-        }
+        payload = {"shop_id": PLATEGA_SHOP_ID, "amount": amount, "currency": "RUB", "order_id": payment_id, "description": f"Subscription {plan}"}
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json()
                 if data.get("url"):
-                    pending_payments[payment_id] = {
-                        "user_id": user_id,
-                        "plan": plan,
-                        "method": "platega",
-                        "amount": amount,
-                        "status": "pending",
-                        "created_at": datetime.now().isoformat()
-                    }
+                    pending_payments[payment_id] = {"user_id": user_id, "plan": plan, "method": "platega"}
                     save_data()
-                    print(f"[PLATEGA] Created payment {payment_id} for user {user_id}")
                     return data["url"], payment_id
-    except Exception as e:
-        print(f"[PLATEGA] Error creating: {e}")
+    except:
+        pass
     return None, None
 
 async def check_platega_payment(payment_id: str) -> bool:
@@ -190,71 +154,54 @@ async def check_platega_payment(payment_id: str) -> bool:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, params=params) as resp:
                 data = await resp.json()
-                status = data.get("status")
-                print(f"[PLATEGA] Payment {payment_id} status: {status}")
-                return status == "paid"
-    except Exception as e:
-        print(f"[PLATEGA] Error checking: {e}")
+                return data.get("status") == "paid"
+    except:
         return False
 
 # ========== ФОНОВАЯ ПРОВЕРКА ПЛАТЕЖЕЙ ==========
-async def payment_checker_job(context: ContextTypes.DEFAULT_TYPE):
-    """Фоновая задача для проверки всех ожидающих платежей"""
-    print(f"[CHECKER] Checking {len(pending_payments)} pending payments...")
-    
-    to_remove = []
-    
-    for payment_id, payment in list(pending_payments.items()):
-        user_id = payment["user_id"]
-        method = payment["method"]
-        
-        # Пропускаем Stars - они обрабатываются через successful_payment
-        if method == "stars":
-            continue
-            
-        # Проверяем возраст платежа (если старше 7 дней - удаляем)
-        created_at = datetime.fromisoformat(payment.get("created_at", datetime.now().isoformat()))
-        if datetime.now() - created_at > timedelta(days=7):
-            to_remove.append(payment_id)
-            print(f"[CHECKER] Removing expired payment {payment_id}")
-            continue
-        
-        # Проверяем CryptoBot платежи
-        if method == "crypto":
-            invoice_id = payment.get("invoice_id")
-            if invoice_id:
-                is_paid, amount = await check_crypto_payment(invoice_id)
-                if is_paid:
-                    activate_subscription(user_id, payment["plan"])
+async def payment_checker_job(app: Application):
+    """Фоновая проверка платежей"""
+    while True:
+        try:
+            to_remove = []
+            for payment_id, payment in list(pending_payments.items()):
+                user_id = payment["user_id"]
+                method = payment["method"]
+                
+                if method == "stars":
+                    continue
+                    
+                created_at = datetime.fromisoformat(payment.get("created_at", datetime.now().isoformat()))
+                if datetime.now() - created_at > timedelta(days=7):
                     to_remove.append(payment_id)
-                    # Уведомляем пользователя
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}\nСумма: {amount} {payment.get('asset', 'USDT')}"
-                    )
-                    print(f"[CHECKER] Crypto payment confirmed for user {user_id}")
+                    continue
+                
+                if method == "crypto":
+                    invoice_id = payment.get("invoice_id")
+                    if invoice_id and await check_crypto_payment(invoice_id):
+                        activate_subscription(user_id, payment["plan"])
+                        to_remove.append(payment_id)
+                        await app.bot.send_message(chat_id=user_id, text=f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}")
+                
+                elif method == "platega":
+                    if await check_platega_payment(payment_id):
+                        activate_subscription(user_id, payment["plan"])
+                        to_remove.append(payment_id)
+                        await app.bot.send_message(chat_id=user_id, text=f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}")
+            
+            for payment_id in to_remove:
+                if payment_id in pending_payments:
+                    del pending_payments[payment_id]
+            
+            if to_remove:
+                save_data()
+        except Exception as e:
+            print(f"[CHECKER] Error: {e}")
         
-        # Проверяем Platega платежи
-        elif method == "platega":
-            is_paid = await check_platega_payment(payment_id)
-            if is_paid:
-                activate_subscription(user_id, payment["plan"])
-                to_remove.append(payment_id)
-                # Уведомляем пользователя
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}\nСумма: {payment['amount']} ₽"
-                )
-                print(f"[CHECKER] Platega payment confirmed for user {user_id}")
-    
-    # Удаляем обработанные платежи
-    for payment_id in to_remove:
-        if payment_id in pending_payments:
-            del pending_payments[payment_id]
-    
-    if to_remove:
-        save_data()
-        print(f"[CHECKER] Removed {len(to_remove)} processed payments")
+        await asyncio.sleep(30)
+
+def start_background_checker(app: Application):
+    asyncio.create_task(payment_checker_job(app))
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
@@ -318,41 +265,27 @@ async def cmd_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❓ FAQ", reply_markup=faq_keyboard())
 
 async def cmd_check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручная проверка платежа"""
     user_id = update.effective_user.id
-    
-    # Показываем все ожидающие платежи пользователя
     user_payments = {pid: p for pid, p in pending_payments.items() if p["user_id"] == user_id}
     
     if not user_payments:
         await update.message.reply_text("❌ У вас нет ожидающих платежей")
         return
     
-    # Проверяем каждый платеж
     activated = []
     for payment_id, payment in user_payments.items():
         method = payment["method"]
-        
-        if method == "crypto":
-            invoice_id = payment.get("invoice_id")
-            if invoice_id:
-                is_paid, amount = await check_crypto_payment(invoice_id)
-                if is_paid:
-                    activate_subscription(user_id, payment["plan"])
-                    activated.append(payment_id)
-                    await update.message.reply_text(f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}")
-        
-        elif method == "platega":
-            is_paid = await check_platega_payment(payment_id)
-            if is_paid:
-                activate_subscription(user_id, payment["plan"])
-                activated.append(payment_id)
-                await update.message.reply_text(f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}")
-        
+        if method == "crypto" and await check_crypto_payment(payment.get("invoice_id", "")):
+            activate_subscription(user_id, payment["plan"])
+            activated.append(payment_id)
+            await update.message.reply_text(f"✅ Подписка активирована через CryptoBot!\nПлан: {payment['plan']}")
+        elif method == "platega" and await check_platega_payment(payment_id):
+            activate_subscription(user_id, payment["plan"])
+            activated.append(payment_id)
+            await update.message.reply_text(f"✅ Подписка активирована через Platega.io!\nПлан: {payment['plan']}")
         elif method == "stars":
-            await update.message.reply_text(f"⭐ Платёж через Stars ожидает оплаты в Telegram\nID: {payment_id}")
+            await update.message.reply_text(f"⭐ Платёж через Stars ожидает оплаты\nID: {payment_id}")
     
-    # Удаляем активированные платежи
     for payment_id in activated:
         if payment_id in pending_payments:
             del pending_payments[payment_id]
@@ -361,59 +294,142 @@ async def cmd_check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data()
     
     if not activated and user_payments:
-        await update.message.reply_text(
-            "💰 Ожидающие платежи:\n" + 
-            "\n".join([f"• {pid}: {p['method']} - {p['plan']}" for pid, p in user_payments.items()]) +
-            "\n\nПосле оплаты нажмите /check_payment снова"
-        )
+        text = "💰 Ожидающие платежи:\n" + "\n".join([f"• {pid}: {p['method']} - {p['plan']}" for pid, p in user_payments.items()])
+        await update.message.reply_text(text)
 
-# ========== ОБРАБОТЧИКИ ==========
-async def handle_business_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.business_message:
-        msg = update.business_message
-        user_id = msg.from_user.id
+# ========== ОБРАБОТЧИКИ BUSINESS API ==========
+
+async def handle_business_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик подключения бота к бизнес-аккаунту"""
+    if not update.business_connection:
+        return
+    
+    conn = update.business_connection
+    user_id = conn.user.id
+    chat_id = conn.user_chat_id
+    
+    # Проверяем права бота
+    can_reply = getattr(conn, 'can_reply', False)
+    
+    print(f"[BUSINESS] Bot connected to user {user_id}")
+    print(f"[BUSINESS] Can reply: {can_reply}")
+    
+    # Отправляем приветствие в чат, где подключили бота
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🤖 Бот успешно подключен к вашему бизнес-аккаунту!\n\n"
+             "Теперь я буду отслеживать изменения и удаления сообщений.\n"
+             "Чтобы сохранить медиа - просто ответьте на сообщение."
+    )
+
+async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кэширование новых сообщений из бизнес-чатов"""
+    if not update.business_message:
+        return
+    
+    msg = update.business_message
+    user_id = msg.from_user.id
+    chat_id = msg.chat_id
+    
+    # Получаем информацию о подключении
+    conn = await context.bot.get_business_connection(
+        business_connection_id=msg.business_connection_id
+    )
+    business_owner_id = conn.user.id
+    
+    # Кэшируем сообщения ТОЛЬКО от владельца бизнес-аккаунта
+    # (сообщения от клиентов мы не можем кэшировать этично)
+    if user_id == business_owner_id:
         if await has_subscription(user_id):
             message_cache[user_id][msg.message_id] = {
                 "text": msg.text or msg.caption or "",
                 "date": msg.date.isoformat(),
+                "chat_id": chat_id
             }
             save_data()
-    if update.edited_business_message:
-        edited = update.edited_business_message
-        user_id = edited.from_user.id
-        if await has_subscription(user_id):
-            msg_id = edited.message_id
-            new_text = edited.text or ""
-            if user_id in message_cache and msg_id in message_cache[user_id]:
-                old_text = message_cache[user_id][msg_id]["text"]
-                if old_text and old_text != new_text:
-                    await context.bot.send_message(
-                        chat_id=edited.chat_id,
-                        text=f"✏️ Изменено сообщение\n\n❌ Было: {old_text[:200]}\n🔘 Стало: {new_text[:200]}"
-                    )
-                    message_cache[user_id][msg_id]["text"] = new_text
-                    save_data()
-    if update.deleted_business_messages:
-        deleted = update.deleted_business_messages
-        user_id = deleted.from_user.id
-        if await has_subscription(user_id):
-            for msg_id in deleted.message_ids:
-                if user_id in message_cache and msg_id in message_cache[user_id]:
-                    cached = message_cache[user_id][msg_id]
-                    await context.bot.send_message(
-                        chat_id=deleted.chat_id,
-                        text=f"🗑 Удалено сообщение\n\n📝 Текст: {cached['text'][:200] if cached['text'] else '[нет текста]'}"
-                    )
+            print(f"[BUSINESS] Cached message {msg.message_id} from business owner")
+    else:
+        # Сообщение от клиента - уведомляем владельца
+        if await has_subscription(business_owner_id):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📨 Новое сообщение от клиента:\n\n{msg.text[:200] if msg.text else '[медиа]'}"
+            )
 
+async def handle_edited_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка изменённых сообщений в бизнес-чатах"""
+    if not update.edited_business_message:
+        return
+    
+    edited = update.edited_business_message
+    user_id = edited.from_user.id
+    msg_id = edited.message_id
+    new_text = edited.text or edited.caption or ""
+    
+    # Получаем информацию о подключении
+    conn = await context.bot.get_business_connection(
+        business_connection_id=edited.business_connection_id
+    )
+    business_owner_id = conn.user.id
+    
+    if user_id == business_owner_id and await has_subscription(user_id):
+        if user_id in message_cache and msg_id in message_cache[user_id]:
+            old_text = message_cache[user_id][msg_id]["text"]
+            if old_text and old_text != new_text:
+                report = (
+                    f"✏️ Вы изменили сообщение\n\n"
+                    f"❌ Было: {old_text[:200]}\n"
+                    f"🔘 Стало: {new_text[:200]}\n"
+                    f"🕐 Время: {datetime.now(TIMEZONE).strftime('%H:%M:%S')}"
+                )
+                await context.bot.send_message(chat_id=edited.chat_id, text=report)
+                message_cache[user_id][msg_id]["text"] = new_text
+                save_data()
+
+async def handle_deleted_business_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка удалённых сообщений в бизнес-чатах"""
+    if not update.deleted_business_messages:
+        return
+    
+    deleted = update.deleted_business_messages
+    business_connection_id = deleted.business_connection_id
+    
+    # Получаем информацию о подключении
+    conn = await context.bot.get_business_connection(
+        business_connection_id=business_connection_id
+    )
+    business_owner_id = conn.user.id
+    
+    if not await has_subscription(business_owner_id):
+        return
+    
+    chat_id = deleted.chat.id
+    
+    for msg_id in deleted.message_ids:
+        if business_owner_id in message_cache and msg_id in message_cache[business_owner_id]:
+            cached = message_cache[business_owner_id][msg_id]
+            report = (
+                f"🗑 Вы удалили сообщение\n\n"
+                f"📝 Текст: {cached['text'][:200] if cached['text'] else '[нет текста]'}\n"
+                f"📅 Отправлено: {datetime.fromisoformat(cached['date']).astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}\n"
+                f"🗑 Удалено: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
+            )
+            await context.bot.send_message(chat_id=chat_id, text=report)
+            print(f"[BUSINESS] Notified about deleted message {msg_id}")
+
+# ========== АВТОСОХРАНЕНИЕ МЕДИА ==========
 async def auto_save_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.reply_to_message:
         return
+    
     user_id = update.effective_user.id
     if not await has_subscription(user_id):
-        await update.message.reply_text("❌ Нет активной подписки")
+        await update.message.reply_text("❌ Нет активной подписки для сохранения медиа")
         return
+    
     reply = update.message.reply_to_message
     os.makedirs("media", exist_ok=True)
+    
     saved = False
     if reply.photo:
         file = await reply.photo[-1].get_file()
@@ -431,9 +447,11 @@ async def auto_save_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await reply.video_note.get_file()
         await file.download_to_drive(f"media/videonote_{reply.message_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         saved = True
+    
     if saved:
         await update.message.reply_text(f"✅ Медиа сохранено!\nВремя: {datetime.now(TIMEZONE).strftime('%H:%M:%S')}")
 
+# ========== CALLBACK HANDLER ==========
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -446,7 +464,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "back_to_menu":
             await query.edit_message_text("📋 Главное меню:", reply_markup=main_menu())
         elif data == "faq":
-            await query.edit_message_text("❓ FAQ", reply_markup=faq_keyboard())
+            await query.edit_message_text("❓ FAQ - Выберите вопрос:", reply_markup=faq_keyboard())
         elif data == "check_sub":
             if await has_subscription(uid):
                 until = subscriptions[uid].astimezone(TIMEZONE)
@@ -462,21 +480,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_data()
             await query.edit_message_text(
                 f"🎁 Пробный доступ активирован!\n\nДействует до: {expiry.astimezone(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"Подключите бота через:\nТелеграм для бизнеса → Чат-боты → Добавить",
+                f"📌 Теперь подключите бота в Telegram для бизнеса:\n"
+                f"1. Настройки → Telegram для бизнеса\n"
+                f"2. Чат-боты → Добавить\n"
+                f"3. Введите @{(await context.bot.get_me()).username}",
                 reply_markup=main_menu()
             )
         elif data.startswith("faq_"):
             texts = {
-                "connect": "🔌 Как подключить бота:\n\n1. Настройки Telegram\n2. Telegram для бизнеса\n3. Чат-боты\n4. Добавить бота\n5. Введите @username бота",
-                "delete": "❌ Как работает удаление:\n\nБот автоматически кэширует все сообщения. При удалении вы получите точную копию с датами.",
-                "save": "💾 Как сохранить медиа:\n\nПросто ответьте на любое сообщение с фото/видео/кружком/голосовым — бот сохранит его автоматически!",
-                "payment": "💳 Способы оплаты:\n\n• Telegram Stars (автоматически)\n• CryptoBot (USDT) - проверка каждые 30 сек\n• Platega.io (карты/СБП) - проверка каждые 30 сек",
+                "connect": "🔌 Подключение бота:\n\n1. Настройки Telegram\n2. Telegram для бизнеса\n3. Чат-боты\n4. Добавить бота\n5. Введите @username бота\n\nПосле подключения бот сам пришлёт приветствие!",
+                "delete": "❌ Отслеживание удалений:\n\nБот автоматически кэширует все ваши сообщения. При удалении вы получите точную копию с датами.",
+                "save": "💾 Сохранение медиа:\n\nПросто ответьте на любое сообщение с фото/видео/голосовым/кружком — бот сохранит его автоматически!",
+                "payment": "💳 Способы оплаты:\n\n• Telegram Stars (мгновенно)\n• CryptoBot (USDT)\n• Platega.io (карты/СБП)",
             }
             topic = data.replace("faq_", "")
             await query.edit_message_text(texts.get(topic, "Ответ не найден"), reply_markup=faq_keyboard())
         elif data.startswith("tariff_"):
             plan = data.replace("tariff_", "")
-            await query.edit_message_text(f"💰 Тариф {plan.replace('_', ' ')}\n\nСпособ оплаты:", reply_markup=payment_methods_keyboard(plan))
+            await query.edit_message_text(f"💰 Тариф {plan.replace('_', ' ')}\n\nВыберите способ оплаты:", reply_markup=payment_methods_keyboard(plan))
         elif data.startswith("pay_"):
             parts = data.split("_")
             method = parts[1]
@@ -488,12 +509,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_data()
                 await context.bot.send_invoice(
                     chat_id=uid,
-                    title=f"Subscription {plan.replace('_', ' ')}",
-                    description=f"Access for {PLANS[plan].days} days",
+                    title=f"Подписка {plan.replace('_', ' ')}",
+                    description=f"Доступ на {PLANS[plan].days} дней",
                     payload=f"sub:{plan}:{uid}:{payment_id}",
                     provider_token="",
                     currency="XTR",
-                    prices=[{"label": "Subscription", "amount": PRICES[plan]["stars"]}],
+                    prices=[{"label": "Подписка", "amount": PRICES[plan]["stars"]}],
                     start_parameter="sub",
                 )
                 await query.edit_message_text("⭐ Счёт на оплату Stars отправлен!\n\nОплатите в диалоге с ботом.")
@@ -506,12 +527,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🪙 Оплата через CryptoBot\n\n"
                         f"Сумма: {amount} USDT\n"
                         f"Ссылка: {url}\n\n"
-                        f"ID платежа: {payment_id}\n\n"
-                        f"После оплаты бот автоматически активирует подписку (проверка каждые 30 секунд)\n"
-                        f"Или используйте /check_payment {payment_id}"
+                        f"ID: {payment_id}\n\n"
+                        f"/check_payment {payment_id}"
                     )
                 else:
-                    await query.edit_message_text("❌ Ошибка создания счёта в CryptoBot. Попробуйте позже.")
+                    await query.edit_message_text("❌ Ошибка создания счёта в CryptoBot")
             
             elif method == "platega":
                 amount = PRICES[plan]["rub"]
@@ -521,16 +541,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"💳 Оплата через Platega.io\n\n"
                         f"Сумма: {amount} ₽\n"
                         f"Ссылка: {url}\n\n"
-                        f"ID платежа: {payment_id}\n\n"
-                        f"После оплаты бот автоматически активирует подписку (проверка каждые 30 секунд)\n"
-                        f"Или используйте /check_payment {payment_id}"
+                        f"ID: {payment_id}\n\n"
+                        f"/check_payment {payment_id}"
                     )
                 else:
-                    await query.edit_message_text("❌ Ошибка создания счёта в Platega.io. Попробуйте позже.")
+                    await query.edit_message_text("❌ Ошибка создания счёта в Platega.io")
     except Exception as e:
         print(f"[CALLBACK] Error: {e}")
         await query.edit_message_text("Произошла ошибка. Попробуйте ещё раз.")
 
+# ========== ПЛАТЕЖИ STARS ==========
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.pre_checkout_query.answer(ok=True)
 
@@ -545,15 +565,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if payment_id in pending_payments:
             del pending_payments[payment_id]
             save_data()
-        await update.message.reply_text(
-            f"✅ Подписка активирована через Telegram Stars!\n\n"
-            f"План: {plan.replace('_', ' ')}\n"
-            f"Действует до: {subscriptions[uid].astimezone(TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')}"
-        )
-
-async def payment_checker_callback(context: ContextTypes.DEFAULT_TYPE):
-    """Обёртка для фоновой задачи"""
-    await payment_checker_job(context)
+        await update.message.reply_text(f"✅ Подписка активирована через Stars!\nПлан: {plan.replace('_', ' ')}")
 
 # ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 def main():
@@ -567,31 +579,46 @@ def main():
     app.add_handler(CommandHandler("faq", cmd_faq))
     app.add_handler(CommandHandler("check_payment", cmd_check_payment))
     
-    # Платежи
+    # Платежи Stars
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     
     # Кнопки
     app.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Бизнес-обработчики
-    app.add_handler(MessageHandler(filters.ALL, handle_business_updates))
+    # ⭐⭐⭐ BUSINESS API ОБРАБОТЧИКИ (исправленные) ⭐⭐⭐
+    # 1. Подключение бота к бизнес-аккаунту
+    app.add_handler(MessageHandler(filters.BUSINESS_CONNECTION, handle_business_connection))
+    
+    # 2. Новые сообщения из бизнес-чатов
+    app.add_handler(MessageHandler(filters.BUSINESS_MESSAGE, handle_business_message))
+    
+    # 3. Изменённые сообщения
+    app.add_handler(MessageHandler(filters.EDITED_BUSINESS_MESSAGE, handle_edited_business_message))
+    
+    # 4. Удалённые сообщения
+    app.add_handler(MessageHandler(filters.DELETED_BUSINESS_MESSAGES, handle_deleted_business_messages))
+    
+    # Автосохранение медиа
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_save_media))
     
-    # Фоновая проверка платежей (каждые 30 секунд)
-    job_queue = app.job_queue
-    if job_queue:
-        job_queue.run_repeating(payment_checker_callback, interval=30, first=10)
-        print("[JOB] Payment checker scheduled every 30 seconds")
+    # Фоновая проверка платежей
+    start_background_checker(app)
     
     print("=" * 50)
     print("✅ БОТ ЗАПУЩЕН!")
     print("=" * 50)
-    print("📌 Функционал:")
-    print("   • Автоматическая проверка платежей (каждые 30 сек)")
-    print("   • CryptoBot и Platega.io проверяются в фоне")
-    print("   • Stars активируются мгновенно")
-    print("   • /check_payment - ручная проверка")
+    print("📌 КЛЮЧЕВЫЕ ИСПРАВЛЕНИЯ:")
+    print("   1. Добавлен обработчик business_connection")
+    print("   2. Исправлен обработчик deleted_business_messages")
+    print("   3. Добавлено кэширование сообщений")
+    print("   4. Фоновая проверка платежей")
+    print("=" * 50)
+    print("\n📌 КАК ПОДКЛЮЧИТЬ БОТА:")
+    print("   1. Настройки Telegram → Telegram для бизнеса")
+    print("   2. Чат-боты → Добавить")
+    print(f"   3. Введите @{(app.bot.username if hasattr(app.bot, 'username') else BOT_TOKEN.split(':')[0])}")
+    print("   4. Выберите чаты и разрешите 'Управление сообщениями'")
     print("=" * 50)
     
     app.run_polling()
